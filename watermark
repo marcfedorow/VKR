@@ -1,0 +1,304 @@
+#include <cmath>
+#include <ctime>
+#include <iostream>
+using std::cin; using std::cout;
+using std::string;
+#include <vector>
+using std::vector;
+
+#define SKIP if(0)
+
+const string dir("C:\\");
+const string fname = dir + "res.txt";
+const string gnuscript_path = dir + "gnu.txt";
+const string path2gnu = "gnuplot";
+
+union {
+	uint32_t i;
+	char c[4];
+} be = { 0x00000001 };
+const bool is_big_endian = be.c[3];
+
+const int time_sets = 1 << 10;
+const double pi = acos(-1);
+const double magic = 2 * pi / time_sets;
+
+float normal(float d = 0.25, int iter = 4) {
+	float r = 0;
+	for (int i = 0; i < iter; ++i) {
+		r += (float)rand() / RAND_MAX;
+	}
+	r /= iter;
+	r -= .5;
+	//r = -r;
+	return r *= d;
+}
+
+float sensor(float average, float max_deviation, int time) {
+	return average + max_deviation * (sin(time * magic) + normal(.25, 1));
+}
+
+int log2(const int n, const bool ceal = true) {
+	int i = n;
+	bool tail = i & (i - 1);
+	if (i <= 0) return -1;
+	int r = 0;
+	while (i >>= 1) ++r;
+	return r + ceal * tail;
+}
+
+int wal(vector<int>* adamar, int user, int time) {
+	return adamar[user][time % adamar[user].size()];
+}
+
+int moment_trust(int w, float delta) {
+	return ((delta == 0) || (w < 0 && delta < 0) || (w > 0 && delta > 0)) ? -1 : 1;
+}
+
+float avg(vector<int>& intruders, vector<float>* user_data, int i) {
+	float result = 0;
+	for (int j = 0; j < intruders.size(); ++j) {
+		result += user_data[intruders[j]][i];
+	}
+	return result /= intruders.size();
+}
+
+float cnt(vector<int>& intruders, vector<float>* user_data, int i, int mode = 0) {
+	float first = user_data[intruders[0]][i], other, cf = 1, co = 0, result = 0;
+	for (int j = 1; j < intruders.size(); ++j) {
+		if (user_data[intruders[j]][i] == first) ++cf;
+		else {
+			if (!co) other = user_data[intruders[j]][i];
+			++co;
+		}
+	}
+	if (!co) return first; //attacker has no "other" so there is no choice
+	if (mode == 'r') return rand() & 1 ? first : other; //random
+	if (mode == 'd') return (first + other) / 2; //watermark deletion
+	if (cf == co) return rand() & 1 ? first : other;
+	return ((cf > co) ^ (mode < 0)) ? first : other; //majority / minority
+}
+
+float maj(vector<int>& intruders, vector<float>* user_data, int i) {
+	return cnt(intruders, user_data, i, 1);
+}
+
+float min(vector<int>& intruders, vector<float>* user_data, int i) {
+	return cnt(intruders, user_data, i, -1);
+}
+
+float rnd(vector<int>& intruders, vector<float>* user_data, int i) {
+	return cnt(intruders, user_data, i, 'r');
+}
+
+float del(vector<int>& intruders, vector<float>* user_data, int i) {
+	return cnt(intruders, user_data, i, 'd');
+}
+
+vector<float> coalition(vector<int>& intruders, vector<float>* user_data, float (*attack_type)(vector<int>&, vector<float>*, int)) {
+	vector<float> res(user_data[0].size());
+	for (int i = 0; i < res.size(); ++i) {
+		res[i] = attack_type(intruders, user_data, i) - 0.1;
+	}
+	return res;
+}
+
+void add_noise(vector<float>& v, float diap, int iter) {
+	for (int i = 0; i < v.size(); ++i) {
+		v[i] += normal(diap, iter);
+	}
+}
+
+vector<float> attack(vector<int>& intruders, vector<float>* users, float (*attack_type)(vector<int>&, vector<float>*, int), float np1, int np2) {
+	vector<float> r = coalition(intruders, users, attack_type);
+	add_noise(r, .2, 1);
+	return r;
+}
+
+#pragma warning(disable : 996)
+int main() {
+	srand(time(0));
+	vector<float> origin(time_sets);
+
+	//data creation
+	{
+		//FILE* f = fopen(fname.c_str(), "w");
+		float average = 25, max_deviation = 10;
+		for (int i = 0; i < time_sets; ++i) {
+			float data = sensor(average, max_deviation, i);
+			//fprintf(f, "%d %f\n", i, data);
+			origin[i] = data;
+		}
+		//fclose(f);
+	}
+
+	//data print
+	SKIP
+	{
+		FILE * f = fopen(gnuscript_path.c_str(), "w");
+		if (!f) return printf("gnuscript not open");
+		fprintf(f, "set autoscale\n");
+		fprintf(f, "set xlabel 'time'\n");
+		fprintf(f, "set terminal windows %d\n", 0);
+		fprintf(f, "set ylabel '%s'\n", "temp");
+		fprintf(f, "plot '%s' w lp title 'temp'\n", fname.c_str());
+		fprintf(f, "pause mouse key\n");
+		fclose(f);
+		string system_message = path2gnu + " " + gnuscript_path;
+		system(system_message.c_str());
+		fclose(f);
+	};
+
+	//create adamar matrix
+	const int N = 16; //users in system, must be power of 2
+	vector<float> users[N];
+	for (int i = 0; i < N; users[i++] = vector<float>(time_sets));
+	vector<int> adamar[N];
+	adamar[0] = vector<int>(1, 1);
+	for (int i = 1; i < N; ++i) {
+		int len = 2 << log2(i, 0);
+		int similar = i - (1 << log2(i, 0));
+		adamar[i] = vector<int>(len);
+		for (int j = 0; j < len / 2; ++j) {
+			adamar[i][j] = adamar[similar][j % adamar[similar].size()];
+			adamar[i][j + len / 2] = -adamar[similar][j % adamar[similar].size()];
+		}
+	}
+
+	//print adamar matrix
+	SKIP
+	{
+		for (int i = 0; i < N; ++i) {
+			printf("%2d: ", i);
+			for (int j = 0; j < N; ++j) {
+				printf("%+d ", adamar[i][j % adamar[i].size()]);
+			}
+			printf("\n");
+		}
+	};
+
+	//create digit copies for every user
+	float delta = .1;
+	{
+		for (int user = 0; user < N; ++user) {
+			for (int time = 0; time < time_sets; ++time) {
+				users[user][time] = origin[time] + delta * adamar[user][time % adamar[user].size()];
+			}
+		}
+	}
+
+	const int period = adamar[N - 1].size();
+	vector<int64_t> suggestion(N, 0);
+	vector<int64_t> suggestion_cumulative(N, 0);
+	string suggestion_filename = dir + "res.txt";
+
+
+	//coalition attack
+	vector<int> intruders = { 6, 7, 8, 9 };
+	vector<float> checking_vector = attack(intruders, users, maj, 20 * delta, 1);
+
+	//4.2
+	//SKIP
+	{
+
+		FILE * f = fopen(suggestion_filename.c_str(), "w");
+		if (!f) return printf("suggestion file not open");
+		for (int i = 0; i < time_sets; ++i) {
+			for (int j = 0; j < N; ++j) {
+				suggestion[j] += moment_trust(wal(adamar, j, i), checking_vector[i] - origin[i]);
+			}
+			if ((i + 1) % N == 0) { //end of segment
+				fprintf(f, "%d ", i / N); //number of segment
+				for (int j = 0; j < N; ++j) {
+					fprintf(f, "%f ", ((float)suggestion[j]) / N);
+				}
+
+				suggestion_cumulative[0] -= abs(suggestion[0]);
+				fprintf(f, "%f ", (float)suggestion_cumulative[0]);
+				for (int j = 1; j < N; ++j) {
+					suggestion_cumulative[j] += suggestion[j];
+					fprintf(f, "%f ", (float)suggestion_cumulative[j]);
+				}
+				fprintf(f, "\n");
+				suggestion = vector<int64_t>(N, 0);
+			}
+		}
+		fclose(f);
+	};
+
+	//4.2 plots --  gnuplot is required!
+	//SKIP
+	{
+		FILE * f = fopen(gnuscript_path.c_str(), "w");
+		if (!f) return printf("gnuscript not open");
+		fprintf(f, "set autoscale\n");
+		fprintf(f, "set xlabel 'marked data sets'\n");
+		fprintf(f, "set ylabel 'degree of mistrust'\n");
+		fprintf(f, "set terminal windows %d\n", 0);
+		fprintf(f, "plot for [i = 2:%d] '%s' using 1:i w lp title sprintf(\"%%d user\", i - 2)\n", N + 1, suggestion_filename.c_str());
+		fprintf(f, "set terminal windows %d\n", 1);
+		fprintf(f, "set ylabel 'points of mistrust'\n");
+		//fprintf(f, "set yrange [0:500]\n");
+		fprintf(f, "plot for [i = %d:%d] '%s' using 1:i w lp title sprintf(\"%%d user cumul\", i - %d)\n", N + 2, 2 * N + 1, suggestion_filename.c_str(), N + 2);
+		fprintf(f, "pause mouse key\n");
+		fclose(f);
+		string system_message = path2gnu + " " + gnuscript_path;
+		system(system_message.c_str());
+		fclose(f);
+	};
+
+	//4.1.1
+	SKIP
+	{
+		checking_vector = origin;
+		add_noise(checking_vector, 1, 1);
+		suggestion = vector<int64_t>(N, 0);
+		float border = 1. / (1 << 1) - 1;
+		int number_of_segments = 1;
+		int correct = 0, incorrect = 0;
+		for (int i = 0; i < time_sets / N * N; ++i) {
+			for (int j = 1; j < N; ++j) {
+				suggestion[j] += moment_trust(wal(adamar, j, i), checking_vector[i] - origin[i]);
+			}
+			if ((i + 1) % (N * number_of_segments) == 0) {
+				for (int j = 1; j < N; ++j) {
+					++(((float)suggestion[j] / (N * number_of_segments) <= border) ? incorrect : correct);
+				}
+				suggestion = vector<int64_t>(N, 0);
+			}
+		}
+		printf("%d packets; border = %f:\nincorrect = %d;\ntotal = %d;\n ratio = %f",
+			N * number_of_segments, border, incorrect, incorrect + correct, (float)incorrect / (incorrect + correct));
+	};
+
+	//4.1.2
+	SKIP
+	{
+		int attacking_user = rand() % (N - 1) + 1; //0 is not a real user
+		printf("attacer = %d\n", attacking_user);
+		checking_vector = users[attacking_user];
+		float d = 8;
+		int iter = 2;
+		add_noise(checking_vector, d, iter);
+		printf("sigma = %f\n", d* d / 12 / iter);
+		suggestion = vector<int64_t>(N, 0);
+		float border = 1. / (1 << 1) - 1;
+		int number_of_segments = 1;
+		int correct = 0, incorrect = 0;
+		int detected = 0, not_detected = 0;
+		for (int i = 0; i < time_sets / N * N; ++i) {
+			suggestion[attacking_user] += moment_trust(wal(adamar, attacking_user, i), checking_vector[i] - origin[i]);
+			if ((i + 1) % (N * number_of_segments) == 0) {
+				++(((float)suggestion[attacking_user] / (N * number_of_segments) <= border) ? detected : not_detected);
+				suggestion = vector<int64_t>(N, 0);
+			}
+		}
+		printf("%d packets; border = %f:\ndetected = %d;\n not detected = %d;\n error ratio = %f",
+			N * number_of_segments, border,
+			//correct, incorrect, (float)incorrect / (incorrect + correct),
+			detected, not_detected, (float)not_detected / (detected + not_detected));
+	};
+
+	printf("\n\nNo output? Try to uncomment any SKIPped block\n\n");
+	return 0;
+}
